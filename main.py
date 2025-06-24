@@ -25,8 +25,27 @@ if 'firebase_db' not in st.session_state:
 
 db = firestore.client()
 
-def save_profile_to_firestore(uid, profile_data):
-    db.collection("users").document(uid).collection("profile").document("main").set(profile_data)
+from datetime import datetime, timedelta
+
+def save_profile_to_firebase(uid, data):
+    # Save profile data
+    db.collection("users").document(uid).collection("profile").document("main").set(data)
+
+    # Optionally initialize consumption history with current day (if new user)
+    today = datetime.today()
+    default_consumption = {
+        "milk": data.get("milk_qty", 0.0),
+        "rice": data.get("rice_qty", 0.0) / 30,  # assuming monthly amount spread over days
+        "oil": data.get("oil_qty", 0.0) / 30,
+        "eggs": data.get("eggs_per_week", 0) / 7,
+        "bread": 2 if data.get("bread_freq") != "Never" else 0
+    }
+
+    for product, qty in default_consumption.items():
+        db.collection("users").document(uid).collection("consumption").document(product).set({
+            today.strftime("%Y-%m-%d"): qty
+        }, merge=True)
+
 
 from datetime import datetime
 def generate_daily_suggestion():
