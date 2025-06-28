@@ -1,13 +1,13 @@
-# main.py (updated with Prophet-based prediction and batch runner)
-
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
 from prophet import Prophet
 import pandas as pd
 from datetime import datetime, timedelta
-import rag
-from habit_parser_and_backfill import parse_habits_and_generate_backfill
+# import rag
+from langchain_community.llms import Ollama
+from langchain_community.chat_models import ChatOllama
+from langchain_core.messages.human import HumanMessage
 
 # ------------------- Initialize Firebase -------------------
 if not firebase_admin._apps:
@@ -76,12 +76,101 @@ def save_profile_to_firestore(uid, data):
         }, merge=True)
 
 # ------------------- Generate Suggestion -------------------
-def generate_daily_suggestion(start_date, current_date):
-    prompt = f"""
-    You are a smart grocery ordering Agentic AI system ...
+# def generate_daily_suggestion(start_date, current_date):
+#     prompt = f"""
+#     You are a smart grocery ordering Agentic AI system ...
+#     """
+#     rag_chain = rag.set_rag_chain()
+#     return rag_chain.run(prompt)
+
+import json
+def parseInput(input_text):
     """
-    rag_chain = rag.set_rag_chain()
-    return rag_chain.run(prompt)
+    Parse input text in format 'product/units/weekly_usage' into list of JSON objects
+    
+    Args:
+        input_text (str): Multi-line string with format:
+                         product/units/weekly_usage
+                         Example: "milk/litres/7\nrice/gms/2100"
+    
+    Returns:
+        list: List of dictionaries with keys: name, unit, weekly_usage
+              Example: [{"name": "milk", "unit": "litres", "weekly_usage": "7"}]
+    """
+    json_objects = []
+    lines = input_text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if line:
+            parts = line.split('/')
+            if len(parts) == 3:
+                product, units, weekly_usage = parts
+                json_obj = {
+                    "name": product.strip(),
+                    "unit": units.strip(),
+                    "weekly_usage": weekly_usage.strip()
+                }
+                json_objects.append(json_obj)
+    
+    return json_objects
+
+# def parseInput(data):
+#     prompt = f"""
+#     You are an Intelligent Data Conversion ASsistant. Convert the following data into valid JSON format.
+#     Each input line is corresponds to a product and it will be following this syntax:
+#     milk/litres/7
+#     which means the product is "milk" and it's weekly usage is '7' and the units of consumption is "litres".
+#     For each product entry, create a JSON object with exactly these fields:
+#     - "name": the product name
+#     - "unit": the unit measurement
+#     - "weekly_usage": the weekly usage amount
+
+#     Input data:
+#     {data}
+
+#     Output format:
+#     {{
+#         "milk": {{ "amount": 0.2, "unit": "liters/day" }},
+#         "rice": {{ "amount": 0.3, "unit": "kg/day" }},
+#         "oil": {{ "amount": 1, "unit": "liters/month" }}
+#     }}
+#     Give only the JSON file, nothing else.
+#     """
+    
+#     chat = ChatOllama(model='gemma:2b')
+#     response = chat.invoke([HumanMessage(content=prompt)])
+#     print(f'response: {response}')
+#     parsed_json = json.loads(response.content)
+#     print(parsed_json)
+#     return parsed_json
+
+from langchain.schema import Document
+from langchain_community.embeddings import OllamaEmbeddings
+import os
+from langchain.vectorstores import FAISS
+def store_profile_embedding(user_id: str, profile_data: str):
+    """
+    Stores or updates a user's profile summary in a LangChain FAISS index.
+    - user_id: unique identifier
+    - summary_text: full profile summary text
+    """
+    summary_text = f"""
+    User is a {profile_data['age']} years old {profile_data['gender']}, weighs {profile_data['weight']}, follows {profile_data['diet_type']} specific diet, and is allergic to {profile_data['allergies']}.
+    User's financial consition is {profile_data['fc']}.
+    """
+
+    doc = Document(page_content=summary_text, metadata={"user_id": user_id})
+
+    embedding_model = OllamaEmbeddings(model="mxbai-embed-large")
+    index_dir = "faiss_index"
+    if os.path.isdir(index_dir) and os.path.exists(os.path.join(index_dir, "index.faiss")):
+        faiss_index = FAISS.load_local(index_dir, embedding_model, allow_dangerous_deserialization=True)
+        faiss_index.add_documents([doc])
+    else:
+        faiss_index = FAISS.from_documents([doc], embedding_model)
+
+    faiss_index.save_local(index_dir)
 
 # ------------------- Login & Onboarding -------------------
 def simple_login():
@@ -164,32 +253,7 @@ def show_onboarding_form():
         st.subheader("2. Food Habits")
         # Food Habits
         with st.form("dietary_form"):
-            milk_options = ["Daily", "Few times a week", "Rarely", "Never"]
-            current_milk = st.session_state.get("milk_freq", "Daily")
-            milk_freq = st.selectbox("How often do you drink milk?", 
-                                   milk_options,
-                                   index=milk_options.index(current_milk) if current_milk in milk_options else 3)
-            
-            milk_qty = st.number_input("How much milk do you consume per day? (in liters)", 
-                                     min_value=0.0, step=0.1, 
-                                     value=st.session_state.get("milk_qty", 0.0))
-            rice_qty = st.number_input("How much rice do you consume per day? (in kg)", 
-                                     min_value=0.0, step=0.1,
-                                     value=st.session_state.get("rice_qty", 0.0))
-            oil_qty = st.number_input("How much cooking oil per month? (in liters)", 
-                                    min_value=0.0, step=0.1,
-                                    value=st.session_state.get("oil_qty", 0.0))
-            eggs_per_week = st.number_input("How many eggs per week?", 
-                                          min_value=0, step=1,
-                                          value=st.session_state.get("eggs_per_week", 0))
             habit_text = st.text_area("Enter your food habits (e.g., 'I drink 200ml milk and eat 300g rice daily')")
-            
-            bread_options = ["Daily", "Weekly", "Occasionally", "Never"]
-            current_bread = st.session_state.get("bread_freq", "Never")
-            bread_freq = st.selectbox("How often do you eat bread?", 
-                                    bread_options,
-                                    index=bread_options.index(current_bread) if current_bread in bread_options else 3)
-
             col1, col2 = st.columns(2)
             with col1:
                 prev_clicked = st.form_submit_button("Previous")
@@ -200,20 +264,20 @@ def show_onboarding_form():
                 prev_page()
                 st.rerun()
             elif finish_clicked:
-                st.session_state.milk_freq = milk_freq
-                st.session_state.milk_qty = milk_qty
-                st.session_state.rice_qty = rice_qty
-                st.session_state.oil_qty = oil_qty
-                st.session_state.eggs_per_week = eggs_per_week
-                st.session_state.bread_freq = bread_freq
-                
                 username = st.session_state.username
-
                 if not habit_text.strip():
                     st.warning("Please enter your food habits first")
                 else:
                     with st.spinner("Taking in the data.."):
-                        parse_habits_and_generate_backfill(habit_text, db, uid=st.session_state.username)
+                        items_list = parseInput(habit_text)
+                        jsonfile = {
+                            "user_id": st.session_state.username,
+                            "store": "Walmart",
+                            "last_updated": st.session_state.current_day.strftime('%A, %d %B %Y'),
+                            "items": items_list
+                        }
+                        with open("products.json", "w") as file:
+                            json.dump(jsonfile, file)
 
                 data = {    
                     "age": st.session_state.get("age", 22),
@@ -223,21 +287,14 @@ def show_onboarding_form():
                     "allergies": st.session_state.get("allergies", "None"),
                     "has_pets": st.session_state.get("has_pets", "No"),
                     "fc": st.session_state.get("fc", "Normal"),
-
-                    "milk_freq": st.session_state.get("milk_freq", "Never"),
-                    "milk_qty": st.session_state.get("milk_qty", 0.0),
-                    "rice_qty": st.session_state.get("rice_qty", 0.0),
-                    "oil_qty": st.session_state.get("oil_qty", 0.0),
-                    "eggs_per_week": st.session_state.get("eggs_per_week", 0),
-                    "bread_freq": st.session_state.get("bread_freq", "Never"),
                 }
                 
                 # Debug output
                 st.write("Debug - Final collected data:", data)
                 
                 save_profile_to_firestore(username, data)
-                summary = rag.build_profile_summary(data)
-                rag.store_profile_embedding(username, summary)
+                # summary = rag.build_profile_summary(data)
+                store_profile_embedding(username, data)
                 
                 st.session_state.initial_data_filled = True
                 st.rerun()
@@ -248,13 +305,7 @@ def show_landing():
     st.write(f"User: {st.session_state.username}")
     st.markdown(f"### 📅 {st.session_state.current_day.strftime('%A, %d %B %Y')}")
 
-    # preds = predict_all_products(st.session_state.username)
-    # st.subheader("🔁 Reorder Predictions")
-    # if preds:
-    #     for prod, d in preds.items():
-    #         st.markdown(f"**{prod.title()}**: order on `{d['reorder_date']}` (daily avg: {d['daily_rate']})")
-    # else:
-    #     st.info("Not enough data to predict consumption yet.")
+    
 
 # ------------------- App Entry -------------------
 if 'start_day' not in st.session_state:
