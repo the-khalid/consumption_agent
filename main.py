@@ -7,10 +7,11 @@ from prophet import Prophet
 import pandas as pd
 from datetime import datetime, timedelta
 import rag
+from habit_parser_and_backfill import parse_habits_and_generate_backfill
 
 # ------------------- Initialize Firebase -------------------
-if 'firebase_initialized' not in st.session_state:
-    cred = credentials.Certificate("consumption-agent-firebase-adminsdk-fbsvc-58b80d61e2.json")
+if not firebase_admin._apps:
+    cred = credentials.Certificate("consumption-agent-firebase-adminsdk-fbsvc-a17c98de69.json")
     firebase_admin.initialize_app(cred)
     st.session_state.firebase_initialized = True
 
@@ -25,38 +26,38 @@ inventory_units = {
     "bread": 1      # 1 loaf
 }
 
-def run_prophet_prediction(uid, product, inventory_dict):
-    doc = db.collection("users").document(uid).collection("consumption").document(product).get()
-    if not doc.exists:
-        return None
-    data = doc.to_dict()
-    if len(data) < 2:
-        return None
+# def run_prophet_prediction(uid, product, inventory_units):
+#     doc = db.collection("users").document(uid).collection("consumption").document(product).get()
+#     if not doc.exists:
+#         return None
+#     data = doc.to_dict()
+#     if len(data) < 2:
+#         return None
 
-    df = pd.DataFrame({
-        "ds": pd.to_datetime(list(data.keys())),
-        "y": list(data.values())
-    }).sort_values("ds")
+#     df = pd.DataFrame({
+#         "ds": pd.to_datetime(list(data.keys())),
+#         "y": list(data.values())
+#     }).sort_values("ds")
 
-    model = Prophet(daily_seasonality=True)
-    model.fit(df)
+#     model = Prophet(daily_seasonality=True)
+#     model.fit(df)
 
-    daily_rate = df["y"].mean()
-    packet_size = inventory_dict.get(product, 1.0)
-    days_to_depletion = int(packet_size / daily_rate)
+#     daily_rate = df["y"].mean()
+#     packet_size = inventory_units.get(product, 1.0)
+#     days_to_depletion = int(packet_size / daily_rate)
 
-    predicted_runout = df["ds"].max() + timedelta(days=days_to_depletion)
-    return {
-        "product": product,
-        "reorder_date": (predicted_runout - timedelta(days=1)).date(),
-        "daily_rate": round(daily_rate, 2)
-    }
+#     predicted_runout = df["ds"].max() + timedelta(days=days_to_depletion)
+#     return {
+#         "product": product,
+#         "reorder_date": (predicted_runout - timedelta(days=1)).date(),
+#         "daily_rate": round(daily_rate, 2)
+#     }
 
-def predict_all_products(uid):
-    return {
-        p: pred for p in inventory_units
-        if (pred := run_prophet_prediction(uid, p, inventory_units))
-    }
+# def predict_all_products(uid):
+#     return {
+#         p: pred for p in inventory_units
+#         if (pred := run_prophet_prediction(uid, p, inventory_units))
+#     }
 
 # ------------------- Profile Save -------------------
 def save_profile_to_firestore(uid, data):
@@ -181,6 +182,7 @@ def show_onboarding_form():
             eggs_per_week = st.number_input("How many eggs per week?", 
                                           min_value=0, step=1,
                                           value=st.session_state.get("eggs_per_week", 0))
+            habit_text = st.text_area("Enter your food habits (e.g., 'I drink 200ml milk and eat 300g rice daily')")
             
             bread_options = ["Daily", "Weekly", "Occasionally", "Never"]
             current_bread = st.session_state.get("bread_freq", "Never")
@@ -206,6 +208,13 @@ def show_onboarding_form():
                 st.session_state.bread_freq = bread_freq
                 
                 username = st.session_state.username
+
+                if not habit_text.strip():
+                    st.warning("Please enter your food habits first")
+                else:
+                    with st.spinner("Taking in the data.."):
+                        parse_habits_and_generate_backfill(habit_text, db, uid=st.session_state.username)
+
                 data = {    
                     "age": st.session_state.get("age", 22),
                     "weight": st.session_state.get("weight", 55.0),
@@ -239,22 +248,13 @@ def show_landing():
     st.write(f"User: {st.session_state.username}")
     st.markdown(f"### 📅 {st.session_state.current_day.strftime('%A, %d %B %Y')}")
 
-    preds = predict_all_products(st.session_state.username)
-    st.subheader("🔁 Reorder Predictions")
-    if preds:
-        for prod, d in preds.items():
-            st.markdown(f"**{prod.title()}**: order on `{d['reorder_date']}` (daily avg: {d['daily_rate']})")
-    else:
-        st.info("Not enough data to predict consumption yet.")
-
-    suggestion = generate_daily_suggestion(st.session_state.start_day, st.session_state.current_day)
-    st.markdown(f"🛒 **Today's Suggestion:** {suggestion}")
-
-    col1, col2 = st.columns(2)
-    if col1.button("Ordered"):
-        st.success("Thanks! We'll use this feedback.")
-    if col2.button("Discard"):
-        st.info("Got it — skipping next time.")
+    # preds = predict_all_products(st.session_state.username)
+    # st.subheader("🔁 Reorder Predictions")
+    # if preds:
+    #     for prod, d in preds.items():
+    #         st.markdown(f"**{prod.title()}**: order on `{d['reorder_date']}` (daily avg: {d['daily_rate']})")
+    # else:
+    #     st.info("Not enough data to predict consumption yet.")
 
 # ------------------- App Entry -------------------
 if 'start_day' not in st.session_state:
